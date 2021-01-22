@@ -203,110 +203,119 @@ impl EventLoop {
 
         if let Some(ref mut inotify) = self.inotify {
             let mut buffer = [0; 1024];
-            match inotify.read_events(&mut buffer) {
-                Ok(events) => {
-                    for event in events {
-                        if event.mask.contains(EventMask::Q_OVERFLOW) {
-                            self.event_tx.send(RawEvent {
-                                path: None,
-                                op: Ok(op::Op::RESCAN),
-                                cookie: None,
-                            });
-                        }
+            loop {
+                match inotify.read_events(&mut buffer) {
+                    Ok(events) => {
+                        let mut num_events = 0;
+                        for event in events {
+                            num_events += 1;
+                            if event.mask.contains(EventMask::Q_OVERFLOW) {
+                                self.event_tx.send(RawEvent {
+                                    path: None,
+                                    op: Ok(op::Op::RESCAN),
+                                    cookie: None,
+                                });
+                            }
 
-                        let path = match event.name {
-                            Some(name) => self.paths.get(&event.wd).map(|root| root.join(&name)),
-                            None => self.paths.get(&event.wd).cloned(),
-                        };
+                            let path = match event.name {
+                                Some(name) => self.paths.get(&event.wd).map(|root| root.join(&name)),
+                                None => self.paths.get(&event.wd).cloned(),
+                            };
 
-                        if event.mask.contains(EventMask::MOVED_FROM) {
-                            send_pending_rename_event(&mut self.rename_event, &mut self.event_tx);
-                            remove_watch_by_event(&path, &self.watches, &mut remove_watches);
-                            self.rename_event = Some(RawEvent {
-                                path: path,
-                                op: Ok(op::Op::RENAME),
-                                cookie: Some(event.cookie),
-                            });
-                        } else {
-                            let mut o = Op::empty();
-                            let mut c = None;
-                            if event.mask.contains(EventMask::MOVED_TO) {
-                                let rename_event = mem::replace(&mut self.rename_event, None);
-                                if let Some(e) = rename_event {
-                                    if e.cookie == Some(event.cookie) {
-                                        self.event_tx.send(e);
-                                        o.insert(op::Op::RENAME);
-                                        c = Some(event.cookie);
+                            if event.mask.contains(EventMask::MOVED_FROM) {
+                                send_pending_rename_event(&mut self.rename_event, &mut self.event_tx);
+                                remove_watch_by_event(&path, &self.watches, &mut remove_watches);
+                                self.rename_event = Some(RawEvent {
+                                    path: path,
+                                    op: Ok(op::Op::RENAME),
+                                    cookie: Some(event.cookie),
+                                });
+                            } else {
+                                let mut o = Op::empty();
+                                let mut c = None;
+                                if event.mask.contains(EventMask::MOVED_TO) {
+                                    let rename_event = mem::replace(&mut self.rename_event, None);
+                                    if let Some(e) = rename_event {
+                                        if e.cookie == Some(event.cookie) {
+                                            self.event_tx.send(e);
+                                            o.insert(op::Op::RENAME);
+                                            c = Some(event.cookie);
+                                        } else {
+                                            o.insert(op::Op::CREATE);
+                                        }
                                     } else {
                                         o.insert(op::Op::CREATE);
                                     }
-                                } else {
-                                    o.insert(op::Op::CREATE);
+                                    add_watch_by_event(&path, &event, &self.watches, &mut add_watches);
                                 }
-                                add_watch_by_event(&path, &event, &self.watches, &mut add_watches);
-                            }
-                            if event.mask.contains(EventMask::MOVE_SELF) {
-                                o.insert(op::Op::RENAME);
-                            }
-                            if event.mask.contains(EventMask::CREATE) {
-                                o.insert(op::Op::CREATE);
-                                add_watch_by_event(&path, &event, &self.watches, &mut add_watches);
-                            }
-                            if event.mask.contains(EventMask::DELETE_SELF)
-                                || event.mask.contains(EventMask::DELETE)
-                            {
-                                o.insert(op::Op::REMOVE);
-                                remove_watch_by_event(&path, &self.watches, &mut remove_watches);
-                            }
-                            if event.mask.contains(EventMask::MODIFY) {
-                                o.insert(op::Op::WRITE);
-                            }
-                            if event.mask.contains(EventMask::CLOSE_WRITE) {
-                                o.insert(op::Op::CLOSE_WRITE);
-                            }
-                            if event.mask.contains(EventMask::ATTRIB) {
-                                o.insert(op::Op::CHMOD);
-                            }
+                                if event.mask.contains(EventMask::MOVE_SELF) {
+                                    o.insert(op::Op::RENAME);
+                                }
+                                if event.mask.contains(EventMask::CREATE) {
+                                    o.insert(op::Op::CREATE);
+                                    add_watch_by_event(&path, &event, &self.watches, &mut add_watches);
+                                }
+                                if event.mask.contains(EventMask::DELETE_SELF)
+                                    || event.mask.contains(EventMask::DELETE)
+                                {
+                                    o.insert(op::Op::REMOVE);
+                                    remove_watch_by_event(&path, &self.watches, &mut remove_watches);
+                                }
+                                if event.mask.contains(EventMask::MODIFY) {
+                                    o.insert(op::Op::WRITE);
+                                }
+                                if event.mask.contains(EventMask::CLOSE_WRITE) {
+                                    o.insert(op::Op::CLOSE_WRITE);
+                                }
+                                if event.mask.contains(EventMask::ATTRIB) {
+                                    o.insert(op::Op::CHMOD);
+                                }
 
-                            if !o.is_empty() {
-                                send_pending_rename_event(
-                                    &mut self.rename_event,
-                                    &mut self.event_tx,
-                                );
+                                if !o.is_empty() {
+                                    send_pending_rename_event(
+                                        &mut self.rename_event,
+                                        &mut self.event_tx,
+                                    );
 
-                                self.event_tx.send(RawEvent {
-                                    path: path,
-                                    op: Ok(o),
-                                    cookie: c,
-                                });
+                                    self.event_tx.send(RawEvent {
+                                        path: path,
+                                        op: Ok(o),
+                                        cookie: c,
+                                    });
+                                }
                             }
                         }
-                    }
 
-                    // When receiving only the first part of a move event (IN_MOVED_FROM) it is unclear
-                    // whether the second part (IN_MOVED_TO) will arrive because the file or directory
-                    // could just have been moved out of the watched directory. So it's necessary to wait
-                    // for possible subsequent events in case it's a complete move event but also to make sure
-                    // that the first part of the event is handled in a timely manner in case no subsequent events arrive.
-                    if let Some(ref rename_event) = self.rename_event {
-                        let event_loop_tx = self.event_loop_tx.clone();
-                        let waker = self.event_loop_waker.clone();
-                        let cookie = rename_event.cookie.unwrap(); // unwrap is safe because rename_event is always set with some cookie
-                        thread::spawn(move || {
-                            thread::sleep(Duration::from_millis(10)); // wait up to 10 ms for a subsequent event
-                            event_loop_tx
-                                .send(EventLoopMsg::RenameTimeout(cookie))
-                                .unwrap();
-                            waker.wake().unwrap();
+                        // All events read, break out.
+                        if num_events == 0 {
+                            break;
+                        }
+
+                        // When receiving only the first part of a move event (IN_MOVED_FROM) it is unclear
+                        // whether the second part (IN_MOVED_TO) will arrive because the file or directory
+                        // could just have been moved out of the watched directory. So it's necessary to wait
+                        // for possible subsequent events in case it's a complete move event but also to make sure
+                        // that the first part of the event is handled in a timely manner in case no subsequent events arrive.
+                        if let Some(ref rename_event) = self.rename_event {
+                            let event_loop_tx = self.event_loop_tx.clone();
+                            let waker = self.event_loop_waker.clone();
+                            let cookie = rename_event.cookie.unwrap(); // unwrap is safe because rename_event is always set with some cookie
+                            thread::spawn(move || {
+                                thread::sleep(Duration::from_millis(10)); // wait up to 10 ms for a subsequent event
+                                event_loop_tx
+                                    .send(EventLoopMsg::RenameTimeout(cookie))
+                                    .unwrap();
+                                waker.wake().unwrap();
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        self.event_tx.send(RawEvent {
+                            path: None,
+                            op: Err(Error::Io(e)),
+                            cookie: None,
                         });
                     }
-                }
-                Err(e) => {
-                    self.event_tx.send(RawEvent {
-                        path: None,
-                        op: Err(Error::Io(e)),
-                        cookie: None,
-                    });
                 }
             }
         }
