@@ -98,8 +98,6 @@ extern crate fsevent_sys;
 extern crate libc;
 #[cfg(target_os = "linux")]
 extern crate mio;
-#[cfg(target_os = "linux")]
-extern crate mio_extras;
 #[cfg(target_os = "windows")]
 extern crate winapi;
 
